@@ -206,7 +206,7 @@ class Bot:
             f"Ready now: {long_ok} LONG • {short_ok} SHORT\n"
             f"Crosses with trend: {s['crosses']}  •  Retests: {s['retests']}\n"
             f"Blocked by 1H shift: {s['blocked_1h']}  •  by BTC shift: {s['blocked_btc']}"
-            f"  •  LONG without BTC uptrend: {s['blocked_btc_trend']}\n"
+            f"  •  LONG without BTC uptrend: {s['blocked_btc_trend']}  •  LONG mode: {s['blocked_long_mode']}\n"
             f"Skipped: weak buyers/sellers {s['weak_taker']}  •  open interest/funding {s['blocked_oi']}\n"
             f"Expired: {s['expired']}  •  Failed: {s['failed']}  •  Weak volume: {s['low_volume']}\n"
             f"Signals sent: {s['signals']}  •  Open: {self.tracker.real_open()}"
@@ -318,10 +318,21 @@ class Bot:
             await asyncio.sleep(6 * 3600)
 
     # --------------------------------------------------------- strategy
+    def update_breadth(self) -> None:
+        """Share of all scanned coins whose 4H is in an uptrend (used by LONG_MODE=strong)."""
+        states = list(self.states.values())
+        if states:
+            up = sum(1 for st in states if self.strategy.trend_4h(st) == "UP")
+            self.strategy.breadth_up = up / len(states)
+
     async def evaluator(self) -> None:
         """Every EVAL_INTERVAL_SEC: follow open signals, then check new closed 1m candles."""
+        last_breadth = 0.0
         while True:
             now = now_ms()
+            if time.time() - last_breadth > 300:
+                self.update_breadth()
+                last_breadth = time.time()
             for st in list(self.states.values()):
                 if not st.updated:
                     continue

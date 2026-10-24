@@ -84,6 +84,7 @@ class Strategy:
         self.cfg = cfg
         self.stats = Counter()        # crosses, retests, expired, failed... for the status report
         self.btc: SymbolState | None = None   # set by main: Bitcoin's live data for the BTC filter
+        self.breadth_up: float | None = None  # set by main: share of all coins in a 4H uptrend
         self._btc_cache = (None, None)        # (last 15m candle time, result)
 
     # --------------------------------------------------- structure shifts
@@ -150,6 +151,11 @@ class Strategy:
                 return None, "1H structure shifted down", side
             if side == "SHORT" and ms == "bull":
                 return None, "1H structure shifted up", side
+        if side == "LONG" and self.cfg.long_mode == "off":
+            return None, "LONG signals switched off", side
+        if side == "LONG" and self.cfg.long_mode == "strong" and self.breadth_up is not None \
+                and self.breadth_up < self.cfg.long_strong_breadth:
+            return None, f"market not strong ({self.breadth_up * 100:.0f}% of coins in 4H uptrend)", side
         if side == "LONG" and self.cfg.long_needs_btc_up and self.btc and st is not self.btc:
             if self.trend_4h(self.btc) != "UP":
                 return None, "BTC 4H not in uptrend", side
@@ -266,7 +272,8 @@ class Strategy:
         if side is None:
             # a cross the 4H/15m would have taken, but a structure shift blocked it
             if (base_side == "LONG" and crossed_up) or (base_side == "SHORT" and crossed_down):
-                key = ("blocked_btc_trend" if why_not.startswith("BTC 4H")
+                key = ("blocked_long_mode" if why_not.startswith(("LONG signals", "market not strong"))
+                       else "blocked_btc_trend" if why_not.startswith("BTC 4H")
                        else "blocked_btc" if why_not.startswith("BTC") else "blocked_1h")
                 self.stats[key] += 1
             return None

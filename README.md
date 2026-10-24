@@ -63,4 +63,4 @@ cd /opt/liquidity-sweep-bot
 .venv/bin/python backtest.py
 ```
 
-Downloads the last 7 days of Binance history for the 30 most active coins and replays the strategy minute by minute in three versions: A (current), B (+ EMA 3/9/21 alignment), C (+ fresh EMA 3 cross). Takes about 5–15 minutes; the live bot keeps running. The result is printed and sent to Telegram. For 14 days: `.venv/bin/python backtest.py 14`.
+Downloads Binance history and replays the strategy minute by minute: A (current), C (+ fresh EMA 3 cross), D (C with LONG off), E (C with LONG only in a strong market). Default 7 days and 30 coins (about 10 minutes). For 3 months: `.venv/bin/python backtest.py 90` (20 coins, about 30–40 minutes, with a 30-day breakdown). The live bot keeps running. The result is printed and sent to Telegram.

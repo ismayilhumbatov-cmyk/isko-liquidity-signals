@@ -2,12 +2,15 @@
 Backtest: replays the bot's exact strategy on real Binance history and compares versions.
 
   A  current strategy
-  B  + EMA 3/9/21 alignment on the big candle
   C  + fresh EMA 3 cross (crossed EMA 9 and 21 within the last 3 candles)
+  D  C with LONG switched off (SHORT only)
+  E  C with LONG only in a strong market (at least half of the tested coins in a 4H uptrend)
+  (D and E are taken from the same C replay: each LONG trade is tagged with the market state.)
 
-Run on the server (takes about 10-20 minutes, the live bot keeps running):
+Run on the server (the live bot keeps running):
     cd /opt/liquidity-sweep-bot
-    .venv/bin/python backtest.py
+    .venv/bin/python backtest.py          7 days, 30 coins (about 10 min)
+    .venv/bin/python backtest.py 90       90 days, 20 coins (about 30-40 min)
 
 What is simulated: 4H trend, 15m check, 1H structure shift, BTC shift pause, LONG only with BTC 4H up,
 1m cross/retest/big candle, volume and buyers/sellers share, limit entry (3 min to fill),
@@ -31,12 +34,12 @@ from bot.symbols import select_symbols
 from bot.utils import C, H, L, T, TF_MS
 
 DAYS = float(os.getenv("BT_DAYS", "7"))
-COINS = int(os.getenv("BT_COINS", "30"))
+COINS = int(os.getenv("BT_COINS", "0"))     # 0 = automatic: 30 coins up to 30 days, 20 coins beyond
 POSITION = 500.0
 MAKER, TAKER = 0.0002, 0.0005
 VARIANTS = [("A", "Current strategy", "off"),
-            ("B", "+ EMA 3/9/21 alignment", "align"),
             ("C", "+ fresh EMA 3 cross", "fresh")]
+STRONG_BREADTH = 0.5
 
 
 def log(msg):
@@ -57,9 +60,11 @@ async def klines(ex, symbol, tf, start, end):
     return [c for c in out if c[T] + step <= end]
 
 
-async def download(ex, symbol, start, end):
-    data = {}
+async def download(ex, symbol, start, end, have_4h=None):
+    data = {"4h": have_4h} if have_4h is not None else {}
     for tf in ("1m", "15m", "1h", "4h"):
+        if tf in data:
+            continue
         warm = (HISTORY[tf] + 5) * TF_MS[tf]
         data[tf] = await klines(ex, symbol, tf, start - warm, end)
     return data
@@ -157,7 +162,32 @@ def cached(strategy):
     return strategy
 
 
-def run_coin(sym, data, btc_data, start, end, mode):
+def breadth_timeline(all_4h, cfg):
+    """Share of tested coins in a 4H uptrend, for every 4H close time."""
+    from bot.indicators import ema_series
+    n = cfg.trend_slope_bars
+    votes = {}                                   # close_time -> [up, total]
+    for arr in all_4h.values():
+        closes = [c[C] for c in arr]
+        ema = ema_series(closes, cfg.trend_ema)
+        for i, c in enumerate(arr):
+            t = c[T] + TF_MS["4h"]
+            v = votes.setdefault(t, [0, 0])
+            v[1] += 1
+            if i >= n and ema[i] is not None and ema[i - n] is not None and closes[i] > ema[i] > ema[i - n]:
+                v[0] += 1
+    times = sorted(votes)
+    return times, [votes[t][0] / votes[t][1] for t in times]
+
+
+def breadth_at(tl, t):
+    import bisect
+    times, vals = tl
+    i = bisect.bisect_right(times, t) - 1
+    return vals[i] if i >= 0 else None
+
+
+def run_coin(sym, data, btc_data, start, end, mode, tl=None):
     cfg = Config()
     cfg.confirm_ema_mode = mode
     strategy = cached(Strategy(cfg))
@@ -184,8 +214,10 @@ def run_coin(sym, data, btc_data, start, end, mode):
             res = outcome(sig, minutes, k, cfg)
             if res:
                 kind, r, usdt, j = res
-                trades.append({"symbol": sym, "side": sig.side, "kind": kind, "r": r, "usdt": usdt,
-                               "sl_pct": abs(sig.entry - sig.sl) / sig.entry * 100})
+                b = breadth_at(tl, t_close) if tl else None
+                trades.append({"symbol": sym, "side": sig.side, "kind": kind, "r": r, "usdt": usdt, "time": t_close,
+                               "sl_pct": abs(sig.entry - sig.sl) / sig.entry * 100,
+                               "strong": b is not None and b >= STRONG_BREADTH})
                 busy_until = max(minutes[j][T] + TF_MS["1m"], t_close + cfg.cooldown_min * 60_000)
             else:
                 busy_until = end + 1
@@ -214,40 +246,76 @@ async def main():
     tg = Telegram(cfg.telegram_token, cfg.telegram_chat_id)
     try:
         pairs = await select_symbols(ex, cfg)
-        ids = list(pairs)[:COINS]
+        coins = COINS or (30 if DAYS <= 30 else 20)
+        ids = list(pairs)[:coins]
         if "BTCUSDT" not in ids:
             ids = ["BTCUSDT"] + ids[:-1]
         end = int(time.time() * 1000) // 60_000 * 60_000
         start = end - int(DAYS * 86_400_000)
-        log(f"Backtest: {len(ids)} coins, last {DAYS:g} days. Downloading BTC first...")
-        btc_data = await download(ex, "BTCUSDT", start, end)
-        results = {v[0]: [] for v in VARIANTS}
-        for n, sym in enumerate(ids, 1):
+        t0 = time.time()
+        log(f"Backtest: {len(ids)} coins, last {DAYS:g} days.")
+        log("Step 1/2: 4H history of all coins (for the market-strength check)...")
+        all_4h = {}
+        for sym in ids:
             try:
-                data = btc_data if sym == "BTCUSDT" else await download(ex, sym, start, end)
+                all_4h[sym] = await klines(ex, sym, "4h", start - (HISTORY["4h"] + 5) * TF_MS["4h"], end)
+            except Exception as e:
+                log(f"{sym}: 4H download failed ({e}), skipped")
+        tl = breadth_timeline(all_4h, cfg)
+        log("Step 2/2: BTC, then each coin (download + replay)...")
+        btc_data = await download(ex, "BTCUSDT", start, end, all_4h.get("BTCUSDT"))
+        results = {"A": [], "C": []}
+        done_coins = 0
+        for n, sym in enumerate(ids, 1):
+            if sym not in all_4h:
+                continue
+            try:
+                data = btc_data if sym == "BTCUSDT" else await download(ex, sym, start, end, all_4h[sym])
             except Exception as e:
                 log(f"{sym}: download failed ({e}), skipped")
                 continue
             line = []
             for code, _, mode in VARIANTS:
-                tr = run_coin(sym, data, btc_data, start, end, mode)
+                tr = run_coin(sym, data, btc_data, start, end, mode, tl)
                 results[code] += tr
                 line.append(f"{code}:{len([t for t in tr if t['kind'] != 'not_filled'])}")
-            log(f"[{n}/{len(ids)}] {sym}  trades {' '.join(line)}")
+            done_coins += 1
+            left = (time.time() - t0) / n * (len(ids) - n) / 60
+            log(f"[{n}/{len(ids)}] {sym}  trades {' '.join(line)}  (about {left:.0f} min left)")
             del data
 
-        rows = {code: summary(results[code]) for code, _, _ in VARIANTS}
-        text = [f"🧪 <b>Backtest — last {DAYS:g} days, {len(ids)} coins</b>",
-                "500 USDT per trade, fees included. OI/funding check and model not included.", ""]
-        for code, name, _ in VARIANTS:
-            s = rows[code]
+        c = results["C"]
+        rows = {
+            "A": ("Current strategy", summary(results["A"])),
+            "C": ("+ fresh EMA 3 cross (LONG on)", summary(c)),
+            "D": ("C, SHORT only (LONG off)", summary([t for t in c if t["side"] == "SHORT"])),
+            "E": ("C, LONG only in a strong market", summary([t for t in c if t["side"] == "SHORT" or t["strong"]])),
+        }
+        text = [f"🧪 <b>Backtest — last {DAYS:g} days, {done_coins} coins</b>",
+                "500 USDT per trade, fees included. OI/funding check and model not included.",
+                f"Strong market = at least {STRONG_BREADTH * 100:.0f}% of tested coins in a 4H uptrend.", ""]
+        for code, (name, s_) in rows.items():
+            per_day = s_["usdt"] / DAYS
             text.append(f"<b>{code}. {name}</b>")
-            text.append(f"Trades {s['n']} (+{s['nf']} not filled) • reached TP1 {s['tp1']:.0f}%")
-            text.append(f"Result {s['r']:+.1f}R ({s['rps']:+.2f}R per trade) • <b>{s['usdt']:+.2f} USDT</b>")
-            text.append(f"LONG {s['long']:+.2f} • SHORT {s['short']:+.2f} USDT")
+            text.append(f"Trades {s_['n']} (+{s_['nf']} not filled) • reached TP1 {s_['tp1']:.0f}%")
+            text.append(f"Result {s_['r']:+.1f}R ({s_['rps']:+.2f}R per trade) • <b>{s_['usdt']:+.2f} USDT</b> "
+                        f"({per_day:+.2f} per day)")
+            text.append(f"LONG {s_['long']:+.2f} • SHORT {s_['short']:+.2f} USDT")
             text.append("")
-        best = max(rows, key=lambda c: rows[c]["usdt"])
-        text.append(f"Best in USDT: <b>{best}</b>")
+        # month by month for the best version, to see if it holds in different markets
+        best = max(rows, key=lambda k: rows[k][1]["usdt"])
+        if DAYS > 30:
+            pool = {"A": results["A"], "C": c,
+                    "D": [t for t in c if t["side"] == "SHORT"],
+                    "E": [t for t in c if t["side"] == "SHORT" or t["strong"]]}[best]
+            text.append(f"<b>{best} by 30-day period:</b>")
+            for k in range(int(DAYS // 30)):
+                lo, hi = start + k * 30 * 86_400_000, start + (k + 1) * 30 * 86_400_000
+                part = [t for t in pool if lo <= t.get("time", 0) < hi and t["kind"] != "not_filled"]
+                text.append(f"Days {k * 30 + 1}–{(k + 1) * 30}: {len(part)} trades, "
+                            f"{sum(t['usdt'] for t in part):+.2f} USDT")
+            text.append("")
+        text.append(f"Best in USDT: <b>{best}</b>  •  run time {(time.time() - t0) / 60:.0f} min")
         msg = "\n".join(text)
         print("\n" + msg.replace("<b>", "").replace("</b>", ""))
         await tg.send(msg)

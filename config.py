@@ -73,6 +73,8 @@ class Config:
     btc_pause_min: float = field(default_factory=lambda: _float("BTC_PAUSE_MIN", 60))
 
     long_needs_btc_up: bool = field(default_factory=lambda: _bool("LONG_NEEDS_BTC_UP", True))
+    long_mode: str = field(default_factory=lambda: _str("LONG_MODE", "on").lower())          # on | off | strong
+    long_strong_breadth: float = field(default_factory=lambda: _float("LONG_STRONG_BREADTH", 0.5))
 
     # --------------------------------------- order flow / positioning filters
     taker_min_share: float = field(default_factory=lambda: _float("TAKER_MIN_SHARE", 0.55))
