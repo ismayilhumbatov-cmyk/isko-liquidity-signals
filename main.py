@@ -16,6 +16,7 @@ import time
 import ccxt.async_support as ccxt
 
 from bot.config import Config
+from bot.learner import Learner
 from bot.market_data import MarketFeed
 from bot.notifier import Telegram
 from bot.state import SymbolState
@@ -36,9 +37,12 @@ class Bot:
         self.ex = ccxt.binanceusdm({"enableRateLimit": True, "options": {"defaultType": "future"}})
         self.strategy = Strategy(cfg)
         self.tracker = SignalTracker(cfg, self.tg, self.journal)
+        self.learner = Learner(cfg)
         self.states: dict[str, SymbolState] = {}
         self.feed: MarketFeed | None = None
         self.feed_task: asyncio.Task | None = None
+        self.funding: dict = {}          # symbol -> last funding rate in % (refreshed every 5 min)
+        self.funding_ts = 0.0
 
     # ------------------------------------------------------------ coins
     async def pair_refresher(self) -> None:
@@ -127,6 +131,50 @@ class Bot:
                 log.exception("status report failed")
             await asyncio.sleep(self.cfg.status_hours * 3600)
 
+    def _model_line(self) -> str:
+        m = self.learner.model or {}
+        if not self.cfg.use_learning:
+            return "🤖 Model: off in settings"
+        if "weights" not in m:
+            try:
+                with open("logs/dataset.csv", encoding="utf-8") as f:
+                    have = max(0, sum(1 for _ in f) - 1)
+            except OSError:
+                have = 0
+            return f"🤖 Model: collecting data — {have} of {self.cfg.learn_min_signals} signals recorded"
+        state = "ON" if self.learner.active else "OFF (not better than rules)"
+        return f"🤖 Model: {state} • skipped this hour: {self.strategy.stats['blocked_model']}"
+
+    def _hours_line(self) -> str:
+        best, worst = self.tracker.best_worst("all")
+        if not best:
+            return ""
+        fmt = lambda rows: ", ".join(f"{h:02d}–{(h + 1) % 24:02d} {v[1]:+.1f}R ({v[0]})" for h, v in rows)
+        return f"\nBy hour (UTC, since start): best {fmt(best)}  •  worst {fmt(worst)}"
+
+    async def daily_summary(self) -> None:
+        """Every day at 00:05 UTC: yesterday's results hour by hour."""
+        while True:
+            now = time.time()
+            nxt = (now // 86400 + 1) * 86400 + 300
+            await asyncio.sleep(nxt - now)
+            try:
+                day = self.tracker.take_day()
+                if not day:
+                    continue
+                total = sum(v[1] for v in day.values())
+                n = sum(v[0] for v in day.values())
+                wins = sum(v[2] for v in day.values())
+                lines = [f"{int(h):02d}–{(int(h) + 1) % 24:02d}  {v[1]:+.2f}R  ({v[0]} signals, {v[2]} in profit)"
+                         for h, v in sorted(day.items(), key=lambda x: int(x[0]))]
+                await self.tg.send(
+                    f"📅 <b>Daily summary — {utc_str(int((nxt - 86400) * 1000))[:10]}</b>\n"
+                    f"Finished signals: {n}  •  in profit: {wins} ({wins / n * 100:.0f}%)\n"
+                    f"Total: <b>{total:+.2f}R</b>\n\n<b>By hour (UTC):</b>\n" + "\n".join(lines)
+                )
+            except Exception:
+                log.exception("daily summary failed")
+
     async def _send_status(self) -> None:
         now = now_ms()
         up = down = flat = long_ok = short_ok = shifted = 0
@@ -157,13 +205,117 @@ class Bot:
             f"{btc_line}\n"
             f"Ready now: {long_ok} LONG • {short_ok} SHORT\n"
             f"Crosses with trend: {s['crosses']}  •  Retests: {s['retests']}\n"
-            f"Blocked by 1H shift: {s['blocked_1h']}  •  by BTC shift: {s['blocked_btc']}\n"
+            f"Blocked by 1H shift: {s['blocked_1h']}  •  by BTC shift: {s['blocked_btc']}"
+            f"  •  LONG without BTC uptrend: {s['blocked_btc_trend']}\n"
+            f"Skipped: weak buyers/sellers {s['weak_taker']}  •  open interest/funding {s['blocked_oi']}\n"
             f"Expired: {s['expired']}  •  Failed: {s['failed']}  •  Weak volume: {s['low_volume']}\n"
-            f"Signals sent: {s['signals']}  •  Open: {len(self.tracker.open)}"
+            f"Signals sent: {s['signals']}  •  Open: {self.tracker.real_open()}"
+            f"\n{self._model_line()}"
+            f"{self._hours_line()}"
         )
         log.info("STATUS %s", text.replace("\n", " | "))
         await self.tg.send(text)
         s.clear()
+
+    # ---------------------------------------------- open interest + funding
+    async def market_context(self, sig) -> tuple[bool, str, dict]:
+        """Does the move have fuel? Uses open interest (OI), funding and the long/short ratio.
+
+        SHORT (LONG is the mirror image):
+          * Skip if OI is falling over the last 30 min (no new positions behind the move).
+          * Skip if funding is extremely negative (shorts very crowded).
+          * Squeeze warning, skip: OI is slowing down (last 15 min weaker than the 15 min before),
+            funding is strongly negative AND accounts are heavily short (long/short ratio low).
+          * Fuel confirmed: OI rising in both halves and funding negative in each of the last
+            3 periods -> new shorts are entering, the downtrend is likely to continue (quality A+).
+        Unknown data never blocks a signal."""
+        cfg = self.cfg
+        info = {"oi_change_pct": None, "oi_first_half_pct": None, "oi_second_half_pct": None,
+                "funding_pct": None, "funding_steady": None, "long_short_ratio": None, "fuel": None}
+        if not cfg.use_oi_filter:
+            return True, "", info
+        sym, short = sig.symbol, sig.side == "SHORT"
+        sign = -1 if short else 1          # fund * sign > 0 = funding on the crowded side of this trade
+        try:
+            if time.time() - self.funding_ts > 300:
+                rows = await self.ex.fapiPublicGetPremiumIndex()
+                self.funding = {r["symbol"]: float(r.get("lastFundingRate") or 0) * 100 for r in rows}
+                self.funding_ts = time.time()
+            if sym in self.funding:
+                info["funding_pct"] = round(self.funding[sym], 4)
+        except Exception as e:
+            log.warning("funding data unavailable: %s", e)
+        try:
+            hist = await self.ex.fapiPublicGetFundingRate({"symbol": sym, "limit": 3})
+            rates = [float(r["fundingRate"]) * 100 for r in hist]
+            if len(rates) == 3:
+                info["funding_steady"] = all(r * sign > 0 for r in rates)   # same side each time
+        except Exception as e:
+            log.warning("funding history unavailable for %s: %s", sym, e)
+        try:
+            points = max(3, cfg.oi_window_min // 5 + 1)
+            hist = await self.ex.fapiDataGetOpenInterestHist({"symbol": sym, "period": "5m", "limit": points})
+            oi = [float(h["sumOpenInterest"]) for h in hist]
+            if len(oi) >= 3 and oi[0] > 0:
+                mid = len(oi) // 2
+                info["oi_change_pct"] = round((oi[-1] - oi[0]) / oi[0] * 100, 2)
+                info["oi_first_half_pct"] = round((oi[mid] - oi[0]) / oi[0] * 100, 2)
+                info["oi_second_half_pct"] = round((oi[-1] - oi[mid]) / oi[mid] * 100, 2) if oi[mid] else None
+        except Exception as e:
+            log.warning("open interest unavailable for %s: %s", sym, e)
+        try:
+            ls = await self.ex.fapiDataGetGlobalLongShortAccountRatio({"symbol": sym, "period": "5m", "limit": 1})
+            if ls:
+                info["long_short_ratio"] = round(float(ls[-1]["longShortRatio"]), 3)
+        except Exception as e:
+            log.warning("long/short ratio unavailable for %s: %s", sym, e)
+
+        oi, oi1, oi2 = info["oi_change_pct"], info["oi_first_half_pct"], info["oi_second_half_pct"]
+        fund, ratio = info["funding_pct"], info["long_short_ratio"]
+        crowd = "shorts" if short else "longs"
+
+        if oi is not None and oi < cfg.oi_min_change_pct:
+            return False, f"open interest falling ({oi:+.2f}% in {cfg.oi_window_min} min)", info
+        if fund is not None and fund * sign >= cfg.funding_extreme_pct:
+            return False, f"funding extreme ({fund:+.4f}%), {crowd} very crowded", info
+        slowing = oi1 is not None and oi2 is not None and oi2 < oi1
+        strong_funding = fund is not None and fund * sign >= cfg.funding_strong_pct
+        skewed = ratio is not None and (ratio <= cfg.ls_crowded_short if short else ratio >= cfg.ls_crowded_long)
+        if slowing and strong_funding and skewed:
+            return False, (f"squeeze warning: open interest slowing ({oi1:+.2f}% → {oi2:+.2f}%), "
+                           f"funding {fund:+.4f}%, long/short ratio {ratio:.2f}"), info
+
+        fuel = (oi1 is not None and oi2 is not None and oi1 > 0 and oi2 > 0 and info["funding_steady"] is True)
+        info["fuel"] = fuel
+        parts = []
+        if oi is not None:
+            parts.append(f"open interest {oi:+.2f}% in {cfg.oi_window_min} min")
+        if fund is not None:
+            parts.append(f"funding {fund:+.4f}%")
+        if ratio is not None:
+            parts.append(f"long/short {ratio:.2f}")
+        line = ("Positioning: " + ", ".join(parts)) if parts else ""
+        if fuel:
+            who = "shorts" if short else "longs"
+            steady = "negative" if short else "positive"
+            line += f"\n🔥 Fuel: new {who} entering (open interest rising, funding steadily {steady})"
+            sig.quality = "A+"
+        return True, line, info
+
+    # ------------------------------------------------------ self-learning
+    async def learning_loop(self) -> None:
+        """Checks every 6 hours whether the model is due for (re)training; trains in the background."""
+        await asyncio.sleep(600)
+        while True:
+            try:
+                if self.learner.due():
+                    report = await asyncio.to_thread(self.learner.train)
+                    if report:
+                        log.info("model: %s", report.replace("\n", " | "))
+                        await self.tg.send(report)
+            except Exception:
+                log.exception("model training failed")
+            await asyncio.sleep(6 * 3600)
 
     # --------------------------------------------------------- strategy
     async def evaluator(self) -> None:
@@ -184,7 +336,28 @@ class Bot:
                     sig = self.strategy.evaluate(st, now)
                     if sig:
                         st.cooldown_until = time.time() + self.cfg.cooldown_min * 60
-                        await self.tracker.publish(sig, st.volume_24h)
+                        ok, line, info = await self.market_context(sig)
+                        sig.features.update(info)
+                        if not ok:
+                            self.strategy.stats["blocked_oi"] += 1
+                            self.strategy.stats["signals"] -= 1
+                            log.info("%s %s skipped: %s", sig.symbol, sig.side, line)
+                            continue
+                        if line:
+                            sig.reasons.append(line)
+                        prob = self.learner.probability(sig.features)
+                        if self.learner.active and prob is not None and prob < self.learner.model["threshold"]:
+                            # the model says no: follow it silently so the model keeps learning
+                            self.strategy.stats["blocked_model"] += 1
+                            self.strategy.stats["signals"] -= 1
+                            log.info("%s %s skipped by model (%.0f%% < %.0f%%)", sig.symbol, sig.side,
+                                     prob * 100, self.learner.model["threshold"] * 100)
+                            await self.tracker.publish(sig, st.volume_24h, shadow=True, model_prob=prob)
+                            continue
+                        if self.learner.active and prob is not None:
+                            sig.reasons.append(f"🤖 Model: {prob * 100:.0f}% chance of profit "
+                                               f"(minimum {self.learner.model['threshold'] * 100:.0f}%)")
+                        await self.tracker.publish(sig, st.volume_24h, model_prob=prob)
                 except Exception:
                     log.exception("evaluation error on %s", st.symbol)
             await asyncio.sleep(self.cfg.eval_interval_sec)
@@ -206,6 +379,7 @@ class Bot:
             f"Scanning {len(pairs)} coins with 24h futures volume ≥ {fmt_usd(cfg.min_24h_volume)} USDT\n"
             f"4H trend → {'15m check → ' if cfg.use_15m_filter else ''}"
             f"{'1H shift filter → ' if cfg.use_shift_filter else ''}{'BTC shift filter → ' if cfg.use_btc_filter else ''}"
+            f"{'OI/funding check → ' if cfg.use_oi_filter else ''}"
             f"1m EMA {cfg.entry_ema} "
             f"cross + retest + big candle (within {cfg.retest_window_min:g} min)\n"
             f"🟢 = LONG   🔴 = SHORT   (signals only, no trading)"
@@ -213,7 +387,8 @@ class Bot:
         self.journal.write("start", strategy="ema_retest", pairs=list(pairs))
         self._restart_feed()
         await asyncio.gather(self.evaluator(), self.pair_refresher(), self.status_reporter(),
-                             self.data_watchdog())
+                             self.data_watchdog(), self.daily_summary(),
+                             self.learning_loop())
 
     async def close(self) -> None:
         for closer in (self.ex.close, self.tg.close):

@@ -72,13 +72,44 @@ class Config:
     use_btc_filter: bool = field(default_factory=lambda: _bool("USE_BTC_FILTER", True))
     btc_pause_min: float = field(default_factory=lambda: _float("BTC_PAUSE_MIN", 60))
 
+    long_needs_btc_up: bool = field(default_factory=lambda: _bool("LONG_NEEDS_BTC_UP", True))
+
+    # --------------------------------------- order flow / positioning filters
+    taker_min_share: float = field(default_factory=lambda: _float("TAKER_MIN_SHARE", 0.55))
+    use_oi_filter: bool = field(default_factory=lambda: _bool("USE_OI_FILTER", True))
+    oi_window_min: int = field(default_factory=lambda: _int("OI_WINDOW_MIN", 30))
+    oi_min_change_pct: float = field(default_factory=lambda: _float("OI_MIN_CHANGE_PCT", 0.0))
+    funding_extreme_pct: float = field(default_factory=lambda: _float("FUNDING_EXTREME_PCT", 0.05))
+    funding_strong_pct: float = field(default_factory=lambda: _float("FUNDING_STRONG_PCT", 0.03))
+    ls_crowded_short: float = field(default_factory=lambda: _float("LS_CROWDED_SHORT", 0.8))
+    ls_crowded_long: float = field(default_factory=lambda: _float("LS_CROWDED_LONG", 2.5))
+
+    # ------------------------------------------------------- limit entry
+    use_limit_entry: bool = field(default_factory=lambda: _bool("USE_LIMIT_ENTRY", True))
+    limit_offset_atr: float = field(default_factory=lambda: _float("LIMIT_OFFSET_ATR", 0.1))
+    limit_valid_min: float = field(default_factory=lambda: _float("LIMIT_VALID_MIN", 3))
+
     # ------------------------------------------- step 3: 1m cross/retest
     entry_ema: int = field(default_factory=lambda: _int("ENTRY_EMA", 50))
     retest_window_min: float = field(default_factory=lambda: _float("RETEST_WINDOW_MIN", 15))
     touch_tolerance_atr: float = field(default_factory=lambda: _float("TOUCH_TOLERANCE_ATR", 0.1))
     close_tolerance_atr: float = field(default_factory=lambda: _float("CLOSE_TOLERANCE_ATR", 0.25))
+    # extra confirmation on the big candle: off | align (EMA3>EMA9>EMA21) | fresh (align + EMA3 crossed in last 3 candles)
+    confirm_ema_mode: str = field(default_factory=lambda: _str("CONFIRM_EMA_MODE", "off").lower())
+    confirm_ema_fast: int = field(default_factory=lambda: _int("CONFIRM_EMA_FAST", 3))
+    confirm_ema_mid: int = field(default_factory=lambda: _int("CONFIRM_EMA_MID", 9))
+    confirm_ema_slow: int = field(default_factory=lambda: _int("CONFIRM_EMA_SLOW", 21))
     big_candle_mult: float = field(default_factory=lambda: _float("BIG_CANDLE_MULT", 1.5))
     confirm_vol_mult: float = field(default_factory=lambda: _float("CONFIRM_VOL_MULT", 1.0))
+
+    # ---------------------------------------------- self-learning model
+    use_learning: bool = field(default_factory=lambda: _bool("USE_LEARNING", True))
+    learn_min_signals: int = field(default_factory=lambda: _int("LEARN_MIN_SIGNALS", 500))
+    learn_every_days: float = field(default_factory=lambda: _float("LEARN_EVERY_DAYS", 7))
+    learn_test_days: float = field(default_factory=lambda: _float("LEARN_TEST_DAYS", 7))
+    learn_min_test: int = field(default_factory=lambda: _int("LEARN_MIN_TEST", 100))
+    learn_min_gain_r: float = field(default_factory=lambda: _float("LEARN_MIN_GAIN_R", 0.1))
+    learn_min_keep: float = field(default_factory=lambda: _float("LEARN_MIN_KEEP", 0.25))
 
     # ------------------------------------------------ stop / targets
     sl_buffer_atr: float = field(default_factory=lambda: _float("SL_BUFFER_ATR", 0.1))

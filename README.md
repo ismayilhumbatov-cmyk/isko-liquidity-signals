@@ -14,6 +14,15 @@ For LONG, the last 15m candle must close above the 15m EMA 50. For SHORT, below 
 - **1H shift:** if the coin's 1H chart closes above its last swing high, the structure has turned up, so no SHORT signals. If it closes below its last swing low, no LONG signals.
 - **BTC shift:** when Bitcoin's 15m structure shifts up, SHORT signals on all coins pause for 60 minutes. When it shifts down, LONG signals pause.
 
+**Extra filters.**
+- LONG signals only while Bitcoin's 4H is in an uptrend.
+- On the big candle, market sellers (SHORT) or buyers (LONG) must make up at least 55% of the volume.
+- Open interest must not be falling over the last 30 minutes, and funding must not be extreme against the trade.
+
+**Limit entry.** The entry is a limit (Post Only) order slightly better than the candle close, so the entry fee is 0.02% instead of 0.05%. If price doesn't return to it within 3 minutes, the bot sends "Not filled" and the signal is cancelled.
+
+**Self-learning model.** Every finished signal is saved in `logs/dataset.csv` with about 30 numbers (candle size, volume, sellers'/buyers' share, stop size, RSI on 1m/15m/1H, volume trend, open interest, funding, long/short ratio, BTC and coin 1H change, hour) and its result. After 500 signals the bot trains a model by itself every 7 days, tests it on the last 7 days it has not seen, and switches it on only if it clearly beats the normal rules. When on, each signal shows its win probability and weak signals are skipped (and still followed silently, so the model keeps learning). Every retraining sends a short report to Telegram.
+
 **3. 1m gives the entry, all within 15 minutes:**
 - **Cross:** a 1m candle closes through the EMA 50 in the trend direction.
 - **Retest:** a later candle comes back and touches the EMA 50 without closing through it. It can be the very next candle.
@@ -46,3 +55,12 @@ Open `settings.env` on GitHub, click the pencil icon, change a number, commit, t
 - **✅ 🎯 🛑 ⚖️:** results of each signal
 - **📊 Status** every 6 hours: trend count, crosses, retests, signals
 - **⚠️ Bot error:** the bot hit an error and restarts by itself
+
+## Backtest (compare versions on real history)
+
+```
+cd /opt/liquidity-sweep-bot
+.venv/bin/python backtest.py
+```
+
+Downloads the last 7 days of Binance history for the 30 most active coins and replays the strategy minute by minute in three versions: A (current), B (+ EMA 3/9/21 alignment), C (+ fresh EMA 3 cross). Takes about 5–15 minutes; the live bot keeps running. The result is printed and sent to Telegram. For 14 days: `.venv/bin/python backtest.py 14`.

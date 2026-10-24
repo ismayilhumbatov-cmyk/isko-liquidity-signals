@@ -39,15 +39,25 @@ class MarketFeed:
         self.use_rest = cfg.data_source == "rest"
 
     # ------------------------------------------------------------ REST
+    async def _klines(self, st: SymbolState, tf: str, limit: int) -> list:
+        """Binance klines incl. taker-buy volume (column 9). Falls back to plain OHLCV."""
+        try:
+            raw = await self.ex.fapiPublicGetKlines({"symbol": st.symbol, "interval": tf, "limit": limit})
+            return [[int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]), float(r[9])]
+                    for r in raw]
+        except AttributeError:
+            rows = await self.ex.fetch_ohlcv(st.ccxt_symbol, tf, limit=limit)
+            return [[int(r[0]), *map(float, r[1:6])] for r in rows]
+
     async def _fetch(self, st: SymbolState, tf: str, limit: int) -> None:
-        rows = await self.ex.fetch_ohlcv(st.ccxt_symbol, tf, limit=limit)
+        rows = await self._klines(st, tf, limit)
         now = now_ms()
         store = st.candles[tf]
         if limit > 10:
             store.clear()
         live = None
         for r in rows:
-            candle = [int(r[0]), *map(float, r[1:6])]
+            candle = list(r)
             if r[0] + TF_MS[tf] <= now:
                 _push_closed(store, candle)
             else:
@@ -90,7 +100,8 @@ class MarketFeed:
         tf = k["i"]
         if st is None or tf not in st.candles:
             return
-        candle = [int(k["t"]), float(k["o"]), float(k["h"]), float(k["l"]), float(k["c"]), float(k["v"])]
+        candle = [int(k["t"]), float(k["o"]), float(k["h"]), float(k["l"]), float(k["c"]), float(k["v"]),
+                  float(k.get("V", 0) or 0)]
         if tf == "1m":
             price = candle[C]
             st.last_price = price
