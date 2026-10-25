@@ -172,6 +172,7 @@ class MarketFeed:
                         await self._fetch(st, "15m", 3)
                         await self._fetch(st, "1h", 3)
                         await self._fetch(st, "4h", 3)
+                        await self._fetch(st, "1d", 2)
                 except Exception as e:
                     log.warning("REST poll %s: %s", st.symbol, e)
             if refresh_slow:

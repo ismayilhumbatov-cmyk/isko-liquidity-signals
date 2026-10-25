@@ -9,7 +9,7 @@ from logging.handlers import RotatingFileHandler
 # A candle is a list: [open_time_ms, open, high, low, close, volume, taker_buy_volume]
 # (taker_buy_volume = volume bought with market orders; may be missing on old data)
 T, O, H, L, C, V, TB = range(7)
-TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
+TF_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 
 log = logging.getLogger("bot")
 

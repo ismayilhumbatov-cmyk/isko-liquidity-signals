@@ -12,6 +12,7 @@ Run on the server (the live bot keeps running):
     .venv/bin/python backtest.py          7 days, 30 coins (about 10 min)
     .venv/bin/python backtest.py 90       90 days, 20 coins (about 30-40 min)
     .venv/bin/python backtest.py 30 range 5-minute high/low break strategy, 30 days
+    .venv/bin/python backtest.py 90 htf   1H high/low break with 15m entry, 90 days
 
 What is simulated: 4H trend, 15m check, 1H structure shift, BTC shift pause, LONG only with BTC 4H up,
 1m cross/retest/big candle, volume and buyers/sellers share, limit entry (3 min to fill),
@@ -31,7 +32,7 @@ from bot.config import Config
 from bot.notifier import Telegram
 from bot.state import HISTORY, SymbolState
 from bot.strategy import Strategy
-from bot.strategy_range import RangeStrategy
+from bot.strategy_range import HtfRangeStrategy, RangeStrategy
 from bot.symbols import select_symbols
 from bot.utils import C, H, L, T, TF_MS
 
@@ -65,7 +66,7 @@ async def klines(ex, symbol, tf, start, end):
 
 async def download(ex, symbol, start, end, have_4h=None):
     data = {"4h": have_4h} if have_4h is not None else {}
-    for tf in ("1m", "15m", "1h", "4h"):
+    for tf in ("1m", "15m", "1h", "4h", "1d"):
         if tf in data:
             continue
         warm = (HISTORY[tf] + 5) * TF_MS[tf]
@@ -120,7 +121,7 @@ class Replay:
         self.st = SymbolState(sym, sym)
         self.data = data
         self.ptr = {}
-        for tf in ("15m", "1h", "4h"):
+        for tf in ("15m", "1h", "4h", "1d"):
             arr = data[tf]
             i = 0
             while i < len(arr) and arr[i][T] + TF_MS[tf] <= start:
@@ -138,7 +139,7 @@ class Replay:
 
     def advance(self, t_close):
         """Adds every candle that has closed by t_close."""
-        for tf in ("1m", "15m", "1h", "4h"):
+        for tf in ("1m", "15m", "1h", "4h", "1d"):
             arr, i = self.data[tf], self.ptr[tf]
             while i < len(arr) and arr[i][T] + TF_MS[tf] <= t_close:
                 self.st.candles[tf].append(arr[i])
@@ -162,6 +163,9 @@ def cached(strategy):
     strategy.trend_4h = lambda st: memo(key(st, "4h") + ("t",), lambda: orig["trend_4h"](st))
     strategy.check_15m = lambda st, side: memo(key(st, "15m") + (side,), lambda: orig["check_15m"](st, side))
     strategy.structure_1h = lambda st: memo(key(st, "1h") + ("s",), lambda: orig["structure_1h"](st))
+    if hasattr(strategy, "trend_tf"):
+        ttf = strategy.trend_tf
+        strategy.trend_tf = lambda st, tf: memo(key(st, tf) + ("tf",), lambda: ttf(st, tf))
     if hasattr(strategy, "trend_1h"):
         t1 = strategy.trend_1h
         strategy.trend_1h = lambda st: memo(key(st, "1h") + ("t1",), lambda: t1(st))
@@ -195,7 +199,11 @@ def breadth_at(tl, t):
 
 def run_coin(sym, data, btc_data, start, end, mode, tl=None):
     cfg = Config()
-    if STRATEGY == "range":
+    if STRATEGY == "htf":
+        cfg.htf_level_bars = int(mode)
+        cfg.cooldown_min = cfg.htf_cooldown_min
+        strategy = cached(HtfRangeStrategy(cfg))
+    elif STRATEGY == "range":
         cfg.range_5m_bars = int(mode)
         strategy = cached(RangeStrategy(cfg))
     else:
@@ -217,6 +225,8 @@ def run_coin(sym, data, btc_data, start, end, mode, tl=None):
         if t_close < busy_until:
             coin.st.setup = None
             coin.st.last_closed_checked = minutes[k][T]
+            if coin.st.candles["15m"]:
+                coin.st.htf_checked = coin.st.candles["15m"][-1][T]
             k += 1
             continue
         sig = strategy.evaluate(coin.st, t_close)
@@ -274,9 +284,10 @@ async def main():
         tl = breadth_timeline(all_4h, cfg)
         log("Step 2/2: BTC, then each coin (download + replay)...")
         btc_data = await download(ex, "BTCUSDT", start, end, all_4h.get("BTCUSDT"))
-        variants = (VARIANTS if STRATEGY != "range"
-                    else [("R1", "Lines = last 1 five-minute candle", "1"),
-                          ("R3", "Lines = last 3 five-minute candles", "3")])
+        variants = {"range": [("R1", "Lines = last 1 five-minute candle", "1"),
+                              ("R3", "Lines = last 3 five-minute candles", "3")],
+                    "htf": [("H1", "Lines = last 1-hour candle", "1"),
+                            ("H4", "Lines = last 4 hours", "4")]}.get(STRATEGY, VARIANTS)
         results = {v[0]: [] for v in variants}
         done_coins = 0
         for n, sym in enumerate(ids, 1):
@@ -297,7 +308,7 @@ async def main():
             log(f"[{n}/{len(ids)}] {sym}  trades {' '.join(line)}  (about {left:.0f} min left)")
             del data
 
-        if STRATEGY == "range":
+        if STRATEGY in ("range", "htf"):
             rows = {code: (name, summary(results[code])) for code, name, _ in variants}
             pools = {code: results[code] for code, _, _ in variants}
         else:
@@ -310,11 +321,12 @@ async def main():
             }
             pools = {"A": results["A"], "C": c, "D": [t for t in c if t["side"] == "SHORT"],
                      "E": [t for t in c if t["side"] == "SHORT" or t["strong"]]}
-        title = "5m high/low break strategy" if STRATEGY == "range" else "EMA retest strategy"
+        title = {"range": "5m high/low break strategy",
+                 "htf": "1H high/low break, 15m entry (Daily + 4H trend)"}.get(STRATEGY, "EMA retest strategy")
         text = [f"🧪 <b>Backtest — {title}, last {DAYS:g} days, {done_coins} coins</b>",
-                "500 USDT per trade, fees included (market entry 0.05%)." if STRATEGY == "range"
+                "500 USDT per trade, fees included (market entry 0.05%)." if STRATEGY in ("range", "htf")
                 else "500 USDT per trade, fees included. OI/funding check and model not included.", ""]
-        if STRATEGY != "range":
+        if STRATEGY not in ("range", "htf"):
             text.insert(2, f"Strong market = at least {STRONG_BREADTH * 100:.0f}% of tested coins in a 4H uptrend.")
         for code, (name, s_) in rows.items():
             per_day = s_["usdt"] / DAYS
@@ -349,6 +361,6 @@ if __name__ == "__main__":
     for arg in sys.argv[1:]:
         if arg.isdigit():
             DAYS = float(arg)
-        elif arg.lower() in ("range", "ema"):
+        elif arg.lower() in ("range", "ema", "htf"):
             STRATEGY = arg.lower()
     asyncio.run(main())

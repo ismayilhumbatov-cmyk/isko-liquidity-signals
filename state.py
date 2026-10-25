@@ -2,8 +2,8 @@
 from collections import deque
 from dataclasses import dataclass, field
 
-TIMEFRAMES = ("1m", "15m", "1h", "4h")
-HISTORY = {"1m": 300, "15m": 200, "1h": 200, "4h": 300}     # candles loaded at start
+TIMEFRAMES = ("1m", "15m", "1h", "4h", "1d")
+HISTORY = {"1m": 300, "15m": 200, "1h": 200, "4h": 300, "1d": 100}     # candles loaded at start
 
 
 def _stores() -> dict:
@@ -19,6 +19,7 @@ class SymbolState:
     live: dict = field(default_factory=lambda: {tf: None for tf in TIMEFRAMES})  # candle still forming
     setup: dict | None = None       # cross waiting for retest / confirmation
     last_closed_checked: int = 0    # open time of the last closed 1m candle the strategy used
+    htf_checked: int = 0            # same, for the 15-minute entry chart of the "htf" strategy
     cooldown_until: float = 0.0     # unix seconds; no new signal on this coin before this time
     last_price: float = 0.0
     tick_high: float | None = None  # highest price since the last check (for TP / SL tracking)

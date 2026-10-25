@@ -62,6 +62,12 @@ class Config:
     strategy: str = field(default_factory=lambda: _str("STRATEGY", "ema").lower())
     range_5m_bars: int = field(default_factory=lambda: _int("RANGE_5M_BARS", 1))
     range_vol_mult: float = field(default_factory=lambda: _float("RANGE_VOL_MULT", 1.5))
+    # "htf" strategy: the same idea one level higher (Daily+4H trend, 1H lines, 15m entry)
+    htf_level_bars: int = field(default_factory=lambda: _int("HTF_LEVEL_BARS", 1))
+    htf_retest_window_min: float = field(default_factory=lambda: _float("HTF_RETEST_WINDOW_MIN", 180))
+    htf_min_sl_pct: float = field(default_factory=lambda: _float("HTF_MIN_SL_PCT", 0.5))
+    htf_max_sl_pct: float = field(default_factory=lambda: _float("HTF_MAX_SL_PCT", 5.0))
+    htf_cooldown_min: float = field(default_factory=lambda: _float("HTF_COOLDOWN_MIN", 120))
 
     # -------------------------------------------------- step 1: 4H trend
     trend_ema: int = field(default_factory=lambda: _int("TREND_EMA", 50))
