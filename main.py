@@ -21,7 +21,7 @@ from bot.market_data import MarketFeed
 from bot.notifier import Telegram
 from bot.state import SymbolState
 from bot.strategy import Strategy
-from bot.strategy_range import RangeStrategy
+from bot.strategy_range import HtfRangeStrategy, OrbStrategy, RangeStrategy
 from bot.symbols import select_symbols
 from bot.tracker import SignalTracker
 from bot.utils import Journal, fmt_usd, now_ms, setup_logging, utc_str
@@ -36,7 +36,8 @@ class Bot:
         self.tg = Telegram(cfg.telegram_token, cfg.telegram_chat_id)
         self.journal = Journal()
         self.ex = ccxt.binanceusdm({"enableRateLimit": True, "options": {"defaultType": "future"}})
-        self.strategy = RangeStrategy(cfg) if cfg.strategy == "range" else Strategy(cfg)
+        self.strategy = {"range": RangeStrategy, "orb": OrbStrategy,
+                         "htf": HtfRangeStrategy}.get(cfg.strategy, Strategy)(cfg)
         self.tracker = SignalTracker(cfg, self.tg, self.journal)
         self.learner = Learner(cfg)
         self.states: dict[str, SymbolState] = {}
@@ -386,7 +387,14 @@ class Bot:
         self.strategy.btc = self.states.get("BTCUSDT")
         await self.feed.bootstrap()
 
-        if cfg.strategy == "range":
+        if cfg.strategy == "orb":
+            await self.tg.send(
+                f"🤖 <b>New York Open Range signal bot started</b>\n"
+                f"Scanning {len(pairs)} coins with 24h futures volume ≥ {fmt_usd(cfg.min_24h_volume)} USDT\n"
+                f"4H + 1H trend → first {cfg.orb_range_min:g} min after 9:30 New York → "
+                f"1m break + retest + big candle with volume (weekdays)\n"
+                f"🟢 = LONG   🔴 = SHORT   (signals only, no trading)")
+        elif cfg.strategy == "range":
             await self.tg.send(
                 f"🤖 <b>5m High/Low Break signal bot started</b>\n"
                 f"Scanning {len(pairs)} coins with 24h futures volume ≥ {fmt_usd(cfg.min_24h_volume)} USDT\n"

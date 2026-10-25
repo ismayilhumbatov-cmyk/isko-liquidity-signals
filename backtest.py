@@ -13,6 +13,7 @@ Run on the server (the live bot keeps running):
     .venv/bin/python backtest.py 90       90 days, 20 coins (about 30-40 min)
     .venv/bin/python backtest.py 30 range 5-minute high/low break strategy, 30 days
     .venv/bin/python backtest.py 90 htf   1H high/low break with 15m entry, 90 days
+    .venv/bin/python backtest.py 30 orb   New York opening range break, 30 days
 
 What is simulated: 4H trend, 15m check, 1H structure shift, BTC shift pause, LONG only with BTC 4H up,
 1m cross/retest/big candle, volume and buyers/sellers share, limit entry (3 min to fill),
@@ -32,7 +33,7 @@ from bot.config import Config
 from bot.notifier import Telegram
 from bot.state import HISTORY, SymbolState
 from bot.strategy import Strategy
-from bot.strategy_range import HtfRangeStrategy, RangeStrategy
+from bot.strategy_range import HtfRangeStrategy, OrbStrategy, RangeStrategy
 from bot.symbols import select_symbols
 from bot.utils import C, H, L, T, TF_MS
 
@@ -199,7 +200,10 @@ def breadth_at(tl, t):
 
 def run_coin(sym, data, btc_data, start, end, mode, tl=None):
     cfg = Config()
-    if STRATEGY == "htf":
+    if STRATEGY == "orb":
+        cfg.orb_range_min = float(mode)
+        strategy = cached(OrbStrategy(cfg))
+    elif STRATEGY == "htf":
         cfg.htf_level_bars = int(mode)
         cfg.cooldown_min = cfg.htf_cooldown_min
         strategy = cached(HtfRangeStrategy(cfg))
@@ -287,7 +291,9 @@ async def main():
         variants = {"range": [("R1", "Lines = last 1 five-minute candle", "1"),
                               ("R3", "Lines = last 3 five-minute candles", "3")],
                     "htf": [("H1", "Lines = last 1-hour candle", "1"),
-                            ("H4", "Lines = last 4 hours", "4")]}.get(STRATEGY, VARIANTS)
+                            ("H4", "Lines = last 4 hours", "4")],
+                    "orb": [("O5", "Lines = first 5 min after New York open", "5"),
+                            ("O15", "Lines = first 15 min after New York open", "15")]}.get(STRATEGY, VARIANTS)
         results = {v[0]: [] for v in variants}
         done_coins = 0
         for n, sym in enumerate(ids, 1):
@@ -308,7 +314,7 @@ async def main():
             log(f"[{n}/{len(ids)}] {sym}  trades {' '.join(line)}  (about {left:.0f} min left)")
             del data
 
-        if STRATEGY in ("range", "htf"):
+        if STRATEGY in ("range", "htf", "orb"):
             rows = {code: (name, summary(results[code])) for code, name, _ in variants}
             pools = {code: results[code] for code, _, _ in variants}
         else:
@@ -322,11 +328,12 @@ async def main():
             pools = {"A": results["A"], "C": c, "D": [t for t in c if t["side"] == "SHORT"],
                      "E": [t for t in c if t["side"] == "SHORT" or t["strong"]]}
         title = {"range": "5m high/low break strategy",
-                 "htf": "1H high/low break, 15m entry (Daily + 4H trend)"}.get(STRATEGY, "EMA retest strategy")
+                 "htf": "1H high/low break, 15m entry (Daily + 4H trend)",
+                 "orb": "New York opening range break (1H + 4H trend, 1m entry)"}.get(STRATEGY, "EMA retest strategy")
         text = [f"🧪 <b>Backtest — {title}, last {DAYS:g} days, {done_coins} coins</b>",
-                "500 USDT per trade, fees included (market entry 0.05%)." if STRATEGY in ("range", "htf")
+                "500 USDT per trade, fees included (market entry 0.05%)." if STRATEGY in ("range", "htf", "orb")
                 else "500 USDT per trade, fees included. OI/funding check and model not included.", ""]
-        if STRATEGY not in ("range", "htf"):
+        if STRATEGY not in ("range", "htf", "orb"):
             text.insert(2, f"Strong market = at least {STRONG_BREADTH * 100:.0f}% of tested coins in a 4H uptrend.")
         for code, (name, s_) in rows.items():
             per_day = s_["usdt"] / DAYS
@@ -361,6 +368,6 @@ if __name__ == "__main__":
     for arg in sys.argv[1:]:
         if arg.isdigit():
             DAYS = float(arg)
-        elif arg.lower() in ("range", "ema", "htf"):
+        elif arg.lower() in ("range", "ema", "htf", "orb"):
             STRATEGY = arg.lower()
     asyncio.run(main())

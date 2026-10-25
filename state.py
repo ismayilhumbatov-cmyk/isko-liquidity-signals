@@ -19,7 +19,10 @@ class SymbolState:
     live: dict = field(default_factory=lambda: {tf: None for tf in TIMEFRAMES})  # candle still forming
     setup: dict | None = None       # cross waiting for retest / confirmation
     last_closed_checked: int = 0    # open time of the last closed 1m candle the strategy used
-    htf_checked: int = 0            # same, for the 15-minute entry chart of the "htf" strategy
+    htf_checked: int = 0
+    orb_day: int = -1               # New York opening range strategy: current UTC day
+    orb_signals: int = 0            # signals sent on this coin today
+    orb_levels: tuple | None = None # (high, low, range start, range end)            # same, for the 15-minute entry chart of the "htf" strategy
     cooldown_until: float = 0.0     # unix seconds; no new signal on this coin before this time
     last_price: float = 0.0
     tick_high: float | None = None  # highest price since the last check (for TP / SL tracking)

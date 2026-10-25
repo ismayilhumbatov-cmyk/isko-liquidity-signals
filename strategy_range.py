@@ -131,7 +131,7 @@ class RangeStrategy(Strategy):
 
         if side is None:
             return None
-        hi, lo = five_minute_levels(closed, i, cfg.range_5m_bars)
+        hi, lo = self._levels(st, closed, i)
         if hi is None:
             return None
         if side == "LONG" and prev[C] <= hi < c[C]:
@@ -141,6 +141,14 @@ class RangeStrategy(Strategy):
             st.setup = {"side": side, "cross_ts": c[T], "phase": "retest", "level": lo, "hi": hi, "lo": lo}
             self.stats["crosses"] += 1
         return None
+
+    def _levels(self, st, closed, i):
+        return five_minute_levels(closed, i, self.cfg.range_5m_bars)
+
+    def level_label(self, s) -> str:
+        n = self.cfg.range_5m_bars
+        return (f"5m lines: high {fmt_price(s['hi'])} • low {fmt_price(s['lo'])}"
+                + (f" (last {n} candles)" if n > 1 else ""))
 
     def _range_signal(self, st, c, s, body_x, vol_x, a1, now_ms) -> Signal | None:
         cfg = self.cfg
@@ -158,11 +166,10 @@ class RangeStrategy(Strategy):
             return None
         risk = abs(entry - sl)
         trend = "uptrend" if long_ else "downtrend"
-        word, colour = ("above the 5m high", "green") if long_ else ("below the 5m low", "red")
+        word, colour = (("above the upper line", "green") if long_ else ("below the lower line", "red"))
         reasons = [
             f"4H and 1H {trend}",
-            f"5m lines: high {fmt_price(s['hi'])} • low {fmt_price(s['lo'])}"
-            + (f" (last {cfg.range_5m_bars} candles)" if cfg.range_5m_bars > 1 else ""),
+            self.level_label(s),
             f"1m: broke {word} at {utc_str(s['cross_ts'])[11:16]} UTC, retest at {utc_str(s['retest_ts'])[11:16]} UTC",
             f"Big {colour} candle: body {body_x:.1f}x average, volume {vol_x:.1f}x average",
         ]
@@ -307,3 +314,68 @@ class HtfRangeStrategy(RangeStrategy):
                       quality, reasons, f"TP1 {cfg.tp1_r:g}R, TP2 {cfg.tp2_r:g}R", now_ms,
                       False, entry, {"side": s["side"], "body_x": round(body_x, 2), "vol_x": round(vol_x, 2),
                                      "sl_pct": round(risk_pct, 3)})
+
+
+
+# ---------------------------------------------------------------- New York open
+def ny_open_utc_ms(day_ms: int, hour: int = 9, minute: int = 30) -> int:
+    """UTC time of hh:mm New York time on the UTC date of day_ms (US summer time handled:
+    from the 2nd Sunday of March to the 1st Sunday of November New York is UTC-4, otherwise UTC-5)."""
+    import datetime as dt
+    d = dt.datetime.utcfromtimestamp(day_ms / 1000).date()
+
+    def nth_sunday(year, month, n):
+        first = dt.date(year, month, 1)
+        return first + dt.timedelta(days=(6 - first.weekday()) % 7 + 7 * (n - 1))
+
+    summer = nth_sunday(d.year, 3, 2) <= d < nth_sunday(d.year, 11, 1)
+    offset = 4 if summer else 5
+    t = dt.datetime(d.year, d.month, d.day, hour, minute) + dt.timedelta(hours=offset)
+    return int(t.replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
+
+
+class OrbStrategy(RangeStrategy):
+    """New York opening range: the lines are the high and low of the first ORB_RANGE_MIN minutes
+    after 9:30 New York time. 1H + 4H trend, then 1m break, retest, big candle with volume.
+    Signals only during ORB_WINDOW_MIN minutes after the range, at most ORB_MAX_SIGNALS per coin per day,
+    weekdays only (ORB_WEEKDAYS_ONLY)."""
+
+    def _orb(self, st, t_ms):
+        cfg = self.cfg
+        day = t_ms // 86_400_000
+        start = ny_open_utc_ms(day * 86_400_000, cfg.orb_open_hour, cfg.orb_open_minute)
+        end = start + int(cfg.orb_range_min * MIN_MS)
+        return day, start, end
+
+    def _levels(self, st, closed, i):
+        cfg = self.cfg
+        c = closed[i]
+        day, start, end = self._orb(st, c[T])
+        if cfg.orb_weekdays_only and ((day + 3) % 7) >= 5:       # Saturday / Sunday
+            return None, None
+        if not (end <= c[T] < end + cfg.orb_window_min * MIN_MS):
+            return None, None
+        if st.orb_day != day:
+            st.orb_day, st.orb_signals, st.orb_levels = day, 0, None
+        if st.orb_signals >= cfg.orb_max_signals:
+            return None, None
+        if st.orb_levels is None:
+            rng = [x for x in closed[max(0, i - 400):i] if start <= x[T] < end]
+            if len(rng) < int(cfg.orb_range_min):
+                return None, None                                  # range candles missing
+            st.orb_levels = (max(x[H] for x in rng), min(x[L] for x in rng), start, end)
+        return st.orb_levels[0], st.orb_levels[1]
+
+    def level_label(self, s) -> str:
+        lv = s.get("orb") or ()
+        when = (f" ({utc_str(lv[2])[11:16]}–{utc_str(lv[3])[11:16]} UTC)" if len(lv) == 4 else "")
+        return f"New York open range{when}: high {fmt_price(s['hi'])} • low {fmt_price(s['lo'])}"
+
+    def _step(self, st, closed, ema, i, now_ms):
+        had = st.setup
+        sig = super()._step(st, closed, ema, i, now_ms)
+        if st.setup is not None and had is None and st.orb_levels:
+            st.setup["orb"] = st.orb_levels
+        if sig:
+            st.orb_signals += 1
+        return sig
