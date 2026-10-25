@@ -58,6 +58,11 @@ class Config:
     pairs: list = field(default_factory=lambda: _list("PAIRS", "BTCUSDT,ETHUSDT,SOLUSDT"))
     exclude_pairs: list = field(default_factory=lambda: _list("EXCLUDE_PAIRS", ""))
 
+    # which strategy the live bot runs: ema (1m EMA 50 retest) | range (5m high/low break)
+    strategy: str = field(default_factory=lambda: _str("STRATEGY", "ema").lower())
+    range_5m_bars: int = field(default_factory=lambda: _int("RANGE_5M_BARS", 1))
+    range_vol_mult: float = field(default_factory=lambda: _float("RANGE_VOL_MULT", 1.5))
+
     # -------------------------------------------------- step 1: 4H trend
     trend_ema: int = field(default_factory=lambda: _int("TREND_EMA", 50))
     trend_slope_bars: int = field(default_factory=lambda: _int("TREND_SLOPE_BARS", 3))

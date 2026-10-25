@@ -21,6 +21,7 @@ from bot.market_data import MarketFeed
 from bot.notifier import Telegram
 from bot.state import SymbolState
 from bot.strategy import Strategy
+from bot.strategy_range import RangeStrategy
 from bot.symbols import select_symbols
 from bot.tracker import SignalTracker
 from bot.utils import Journal, fmt_usd, now_ms, setup_logging, utc_str
@@ -35,7 +36,7 @@ class Bot:
         self.tg = Telegram(cfg.telegram_token, cfg.telegram_chat_id)
         self.journal = Journal()
         self.ex = ccxt.binanceusdm({"enableRateLimit": True, "options": {"defaultType": "future"}})
-        self.strategy = Strategy(cfg)
+        self.strategy = RangeStrategy(cfg) if cfg.strategy == "range" else Strategy(cfg)
         self.tracker = SignalTracker(cfg, self.tg, self.journal)
         self.learner = Learner(cfg)
         self.states: dict[str, SymbolState] = {}
@@ -385,7 +386,14 @@ class Bot:
         self.strategy.btc = self.states.get("BTCUSDT")
         await self.feed.bootstrap()
 
-        await self.tg.send(
+        if cfg.strategy == "range":
+            await self.tg.send(
+                f"🤖 <b>5m High/Low Break signal bot started</b>\n"
+                f"Scanning {len(pairs)} coins with 24h futures volume ≥ {fmt_usd(cfg.min_24h_volume)} USDT\n"
+                f"4H + 1H trend → 5m high/low lines → 1m break + retest + big candle with volume\n"
+                f"🟢 = LONG   🔴 = SHORT   (signals only, no trading)")
+        else:
+          await self.tg.send(
             f"🤖 <b>{BOT_NAME} started</b>\n"
             f"Scanning {len(pairs)} coins with 24h futures volume ≥ {fmt_usd(cfg.min_24h_volume)} USDT\n"
             f"4H trend → {'15m check → ' if cfg.use_15m_filter else ''}"

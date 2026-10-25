@@ -11,6 +11,7 @@ Run on the server (the live bot keeps running):
     cd /opt/liquidity-sweep-bot
     .venv/bin/python backtest.py          7 days, 30 coins (about 10 min)
     .venv/bin/python backtest.py 90       90 days, 20 coins (about 30-40 min)
+    .venv/bin/python backtest.py 30 range 5-minute high/low break strategy, 30 days
 
 What is simulated: 4H trend, 15m check, 1H structure shift, BTC shift pause, LONG only with BTC 4H up,
 1m cross/retest/big candle, volume and buyers/sellers share, limit entry (3 min to fill),
@@ -30,6 +31,7 @@ from bot.config import Config
 from bot.notifier import Telegram
 from bot.state import HISTORY, SymbolState
 from bot.strategy import Strategy
+from bot.strategy_range import RangeStrategy
 from bot.symbols import select_symbols
 from bot.utils import C, H, L, T, TF_MS
 
@@ -40,6 +42,7 @@ MAKER, TAKER = 0.0002, 0.0005
 VARIANTS = [("A", "Current strategy", "off"),
             ("C", "+ fresh EMA 3 cross", "fresh")]
 STRONG_BREADTH = 0.5
+STRATEGY = "ema"          # "range" = the 5-minute high/low break strategy
 
 
 def log(msg):
@@ -159,6 +162,9 @@ def cached(strategy):
     strategy.trend_4h = lambda st: memo(key(st, "4h") + ("t",), lambda: orig["trend_4h"](st))
     strategy.check_15m = lambda st, side: memo(key(st, "15m") + (side,), lambda: orig["check_15m"](st, side))
     strategy.structure_1h = lambda st: memo(key(st, "1h") + ("s",), lambda: orig["structure_1h"](st))
+    if hasattr(strategy, "trend_1h"):
+        t1 = strategy.trend_1h
+        strategy.trend_1h = lambda st: memo(key(st, "1h") + ("t1",), lambda: t1(st))
     return strategy
 
 
@@ -189,8 +195,12 @@ def breadth_at(tl, t):
 
 def run_coin(sym, data, btc_data, start, end, mode, tl=None):
     cfg = Config()
-    cfg.confirm_ema_mode = mode
-    strategy = cached(Strategy(cfg))
+    if STRATEGY == "range":
+        cfg.range_5m_bars = int(mode)
+        strategy = cached(RangeStrategy(cfg))
+    else:
+        cfg.confirm_ema_mode = mode
+        strategy = cached(Strategy(cfg))
     coin = Replay(sym, data, start)
     btc = coin if sym == "BTCUSDT" else Replay("BTCUSDT", btc_data, start)
     strategy.btc = btc.st
@@ -264,7 +274,10 @@ async def main():
         tl = breadth_timeline(all_4h, cfg)
         log("Step 2/2: BTC, then each coin (download + replay)...")
         btc_data = await download(ex, "BTCUSDT", start, end, all_4h.get("BTCUSDT"))
-        results = {"A": [], "C": []}
+        variants = (VARIANTS if STRATEGY != "range"
+                    else [("R1", "Lines = last 1 five-minute candle", "1"),
+                          ("R3", "Lines = last 3 five-minute candles", "3")])
+        results = {v[0]: [] for v in variants}
         done_coins = 0
         for n, sym in enumerate(ids, 1):
             if sym not in all_4h:
@@ -275,7 +288,7 @@ async def main():
                 log(f"{sym}: download failed ({e}), skipped")
                 continue
             line = []
-            for code, _, mode in VARIANTS:
+            for code, _, mode in variants:
                 tr = run_coin(sym, data, btc_data, start, end, mode, tl)
                 results[code] += tr
                 line.append(f"{code}:{len([t for t in tr if t['kind'] != 'not_filled'])}")
@@ -284,16 +297,25 @@ async def main():
             log(f"[{n}/{len(ids)}] {sym}  trades {' '.join(line)}  (about {left:.0f} min left)")
             del data
 
-        c = results["C"]
-        rows = {
-            "A": ("Current strategy", summary(results["A"])),
-            "C": ("+ fresh EMA 3 cross (LONG on)", summary(c)),
-            "D": ("C, SHORT only (LONG off)", summary([t for t in c if t["side"] == "SHORT"])),
-            "E": ("C, LONG only in a strong market", summary([t for t in c if t["side"] == "SHORT" or t["strong"]])),
-        }
-        text = [f"🧪 <b>Backtest — last {DAYS:g} days, {done_coins} coins</b>",
-                "500 USDT per trade, fees included. OI/funding check and model not included.",
-                f"Strong market = at least {STRONG_BREADTH * 100:.0f}% of tested coins in a 4H uptrend.", ""]
+        if STRATEGY == "range":
+            rows = {code: (name, summary(results[code])) for code, name, _ in variants}
+            pools = {code: results[code] for code, _, _ in variants}
+        else:
+            c = results["C"]
+            rows = {
+                "A": ("Current strategy", summary(results["A"])),
+                "C": ("+ fresh EMA 3 cross (LONG on)", summary(c)),
+                "D": ("C, SHORT only (LONG off)", summary([t for t in c if t["side"] == "SHORT"])),
+                "E": ("C, LONG only in a strong market", summary([t for t in c if t["side"] == "SHORT" or t["strong"]])),
+            }
+            pools = {"A": results["A"], "C": c, "D": [t for t in c if t["side"] == "SHORT"],
+                     "E": [t for t in c if t["side"] == "SHORT" or t["strong"]]}
+        title = "5m high/low break strategy" if STRATEGY == "range" else "EMA retest strategy"
+        text = [f"🧪 <b>Backtest — {title}, last {DAYS:g} days, {done_coins} coins</b>",
+                "500 USDT per trade, fees included (market entry 0.05%)." if STRATEGY == "range"
+                else "500 USDT per trade, fees included. OI/funding check and model not included.", ""]
+        if STRATEGY != "range":
+            text.insert(2, f"Strong market = at least {STRONG_BREADTH * 100:.0f}% of tested coins in a 4H uptrend.")
         for code, (name, s_) in rows.items():
             per_day = s_["usdt"] / DAYS
             text.append(f"<b>{code}. {name}</b>")
@@ -302,17 +324,16 @@ async def main():
                         f"({per_day:+.2f} per day)")
             text.append(f"LONG {s_['long']:+.2f} • SHORT {s_['short']:+.2f} USDT")
             text.append("")
-        # month by month for the best version, to see if it holds in different markets
+        # period by period for the best version, to see if it holds in different markets
         best = max(rows, key=lambda k: rows[k][1]["usdt"])
-        if DAYS > 30:
-            pool = {"A": results["A"], "C": c,
-                    "D": [t for t in c if t["side"] == "SHORT"],
-                    "E": [t for t in c if t["side"] == "SHORT" or t["strong"]]}[best]
-            text.append(f"<b>{best} by 30-day period:</b>")
-            for k in range(int(DAYS // 30)):
-                lo, hi = start + k * 30 * 86_400_000, start + (k + 1) * 30 * 86_400_000
+        period = 30 if DAYS > 30 else 7
+        if DAYS >= 2 * period:
+            pool = pools[best]
+            text.append(f"<b>{best} by {period}-day period:</b>")
+            for k in range(int(DAYS // period)):
+                lo, hi = start + k * period * 86_400_000, start + (k + 1) * period * 86_400_000
                 part = [t for t in pool if lo <= t.get("time", 0) < hi and t["kind"] != "not_filled"]
-                text.append(f"Days {k * 30 + 1}–{(k + 1) * 30}: {len(part)} trades, "
+                text.append(f"Days {k * period + 1}–{(k + 1) * period}: {len(part)} trades, "
                             f"{sum(t['usdt'] for t in part):+.2f} USDT")
             text.append("")
         text.append(f"Best in USDT: <b>{best}</b>  •  run time {(time.time() - t0) / 60:.0f} min")
@@ -325,6 +346,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1].isdigit():
-        DAYS = float(sys.argv[1])
+    for arg in sys.argv[1:]:
+        if arg.isdigit():
+            DAYS = float(arg)
+        elif arg.lower() in ("range", "ema"):
+            STRATEGY = arg.lower()
     asyncio.run(main())
