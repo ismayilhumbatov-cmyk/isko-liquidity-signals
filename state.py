@@ -20,6 +20,7 @@ class SymbolState:
     setup: dict | None = None       # cross waiting for retest / confirmation
     last_closed_checked: int = 0    # open time of the last closed 1m candle the strategy used
     htf_checked: int = 0
+    smc_1h_checked: int = 0         # SMC strategy: last closed 1H candle processed
     orb_day: int = -1               # New York opening range strategy: current UTC day
     orb_signals: int = 0            # signals sent on this coin today
     orb_levels: tuple | None = None # (high, low, range start, range end)            # same, for the 15-minute entry chart of the "htf" strategy

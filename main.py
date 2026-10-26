@@ -22,6 +22,7 @@ from bot.notifier import Telegram
 from bot.state import SymbolState
 from bot.strategy import Strategy
 from bot.strategy_range import HtfRangeStrategy, OrbStrategy, RangeStrategy
+from bot.strategy_smc import SmcStrategy
 from bot.symbols import select_symbols
 from bot.tracker import SignalTracker
 from bot.utils import Journal, fmt_usd, now_ms, setup_logging, utc_str
@@ -36,8 +37,14 @@ class Bot:
         self.tg = Telegram(cfg.telegram_token, cfg.telegram_chat_id)
         self.journal = Journal()
         self.ex = ccxt.binanceusdm({"enableRateLimit": True, "options": {"defaultType": "future"}})
-        self.strategy = {"range": RangeStrategy, "orb": OrbStrategy,
-                         "htf": HtfRangeStrategy}.get(cfg.strategy, Strategy)(cfg)
+        self.strategy = {"range": RangeStrategy, "orb": OrbStrategy, "htf": HtfRangeStrategy,
+                         "smc": SmcStrategy}.get(cfg.strategy, Strategy)(cfg)
+        if cfg.strategy == "smc":
+            cfg.cooldown_min = cfg.smc_cooldown_min          # 5 hours per coin after a signal
+            if cfg.max_pairs == 0:
+                cfg.max_pairs = cfg.smc_top_coins            # only the most liquid coins
+        elif cfg.strategy == "htf":
+            cfg.cooldown_min = cfg.htf_cooldown_min
         self.tracker = SignalTracker(cfg, self.tg, self.journal)
         self.learner = Learner(cfg)
         self.states: dict[str, SymbolState] = {}
@@ -345,12 +352,19 @@ class Bot:
                     if self.tracker.has_open(st.symbol) or time.time() < st.cooldown_until:
                         st.setup = None
                         st.last_closed_checked = st.candles["1m"][-1][0] if st.candles["1m"] else 0
+                        st.htf_checked = st.candles["15m"][-1][0] if st.candles["15m"] else 0
+                        st.smc_1h_checked = st.candles["1h"][-1][0] if st.candles["1h"] else 0
                         continue
                     sig = self.strategy.evaluate(st, now)
                     if sig:
                         st.cooldown_until = time.time() + self.cfg.cooldown_min * 60
                         ok, line, info = await self.market_context(sig)
                         sig.features.update(info)
+                        if sig.card:
+                            # SMC: open interest is shown as information; only extreme funding blocks
+                            ok = ok or not line.startswith("funding extreme")
+                            if line and ok:
+                                sig.card["reasons"][-1] += "; " + line.replace("Positioning: ", "").split("\n")[0]
                         if not ok:
                             self.strategy.stats["blocked_oi"] += 1
                             self.strategy.stats["signals"] -= 1
@@ -358,7 +372,7 @@ class Bot:
                             continue
                         if line:
                             sig.reasons.append(line)
-                        prob = self.learner.probability(sig.features)
+                        prob = self.learner.probability(sig.features) if self.cfg.strategy == "ema" else None
                         if self.learner.active and prob is not None and prob < self.learner.model["threshold"]:
                             # the model says no: follow it silently so the model keeps learning
                             self.strategy.stats["blocked_model"] += 1
@@ -387,7 +401,14 @@ class Bot:
         self.strategy.btc = self.states.get("BTCUSDT")
         await self.feed.bootstrap()
 
-        if cfg.strategy == "orb":
+        if cfg.strategy == "smc":
+            await self.tg.send(
+                f"🤖 <b>Smart Money signal bot started</b>\n"
+                f"Scanning the {len(pairs)} most liquid Binance futures coins\n"
+                f"4H structure → 1H liquidity sweep → displacement → OB/FVG retest → 15m confirmation\n"
+                f"Minimum confluence score {cfg.smc_min_score}/5 • 5h cooldown per coin\n"
+                f"Signals only, no trading")
+        elif cfg.strategy == "orb":
             await self.tg.send(
                 f"🤖 <b>New York Open Range signal bot started</b>\n"
                 f"Scanning {len(pairs)} coins with 24h futures volume ≥ {fmt_usd(cfg.min_24h_volume)} USDT\n"

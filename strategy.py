@@ -70,6 +70,7 @@ class Signal:
     limit: bool = False             # entry is a limit (Post Only) order
     signal_price: float = 0.0       # close of the confirmation candle
     features: dict = field(default_factory=dict)   # numbers recorded for the learning model
+    card: dict = field(default_factory=dict)       # SMC strategy: data for its own message format
 
     @property
     def risk(self) -> float:

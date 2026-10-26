@@ -58,8 +58,29 @@ def _e(s) -> str:
     return html.escape(str(s))
 
 
+def smc_message(sig, cfg) -> str:
+    """Signal format of the Smart Money Liquidity Sweep strategy."""
+    k = sig.card
+    lo, hi = k["zone"]
+    lines = [
+        f"🔔 <b>{_e(sig.symbol)} {sig.side} SIGNAL</b>",
+        "Timeframe: 4H Bias + 1H Entry",
+        "Setup: Liquidity Sweep → Displacement → OB/FVG Retest",
+        f"Entry Zone: <code>{fmt_price(lo)} – {fmt_price(hi)}</code>",
+        f"Stop Loss: <code>{fmt_price(sig.sl)}</code>",
+        f"Take Profit 1 (1:{cfg.smc_tp1_r:g}): <code>{fmt_price(sig.tp1)}</code>",
+        f"Take Profit 2 (1:{cfg.smc_tp2_r:g}): <code>{fmt_price(sig.tp2)}</code>",
+        f"Confluence Score: <b>{k['score']}/5</b>",
+        "Reasons:",
+    ]
+    lines += [f"- {_e(r)}" for r in k["reasons"]]
+    return "\n".join(lines)
+
+
 def signal_message(sig, cfg, volume_24h: float = 0.0) -> str:
     """Main signal card: green for LONG, red for SHORT."""
+    if getattr(sig, "card", None):
+        return smc_message(sig, cfg)
     long_ = sig.side == "LONG"
     head = "🟢🟢 <b>LONG</b>" if long_ else "🔴🔴 <b>SHORT</b>"
     lines = [

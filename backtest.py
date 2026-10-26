@@ -14,6 +14,7 @@ Run on the server (the live bot keeps running):
     .venv/bin/python backtest.py 30 range 5-minute high/low break strategy, 30 days
     .venv/bin/python backtest.py 90 htf   1H high/low break with 15m entry, 90 days
     .venv/bin/python backtest.py 30 orb   New York opening range break, 30 days
+    .venv/bin/python backtest.py 90 smc   Smart Money liquidity sweep + OB/FVG, 90 days
 
 What is simulated: 4H trend, 15m check, 1H structure shift, BTC shift pause, LONG only with BTC 4H up,
 1m cross/retest/big candle, volume and buyers/sellers share, limit entry (3 min to fill),
@@ -34,6 +35,7 @@ from bot.notifier import Telegram
 from bot.state import HISTORY, SymbolState
 from bot.strategy import Strategy
 from bot.strategy_range import HtfRangeStrategy, OrbStrategy, RangeStrategy
+from bot.strategy_smc import SmcStrategy
 from bot.symbols import select_symbols
 from bot.utils import C, H, L, T, TF_MS
 
@@ -93,6 +95,8 @@ def outcome(sig, minutes, k, cfg):
         return ("not_filled", 0.0, 0.0, min(j, n - 1)) if j < n else None
     half = POSITION / 2
     fees = POSITION * (MAKER if sig.limit else TAKER)
+    risk = abs(entry - sl) or 1e-12
+    r1, r2 = abs(tp1 - entry) / risk, abs(tp2 - entry) / risk
     usdt, tp1_done, stop = 0.0, False, sl
     while j < n:
         c = minutes[j]
@@ -102,7 +106,7 @@ def outcome(sig, minutes, k, cfg):
         if hit_stop:                                      # careful: stop counts first
             size = half if tp1_done else POSITION
             usdt += size * (stop - entry) / entry * sign - size * TAKER
-            r = 0.75 if tp1_done else -1.0
+            r = 0.5 * r1 if tp1_done else -1.0
             return ("BE" if tp1_done else "SL", r, usdt - fees, j)
         if not tp1_done and hit_tp1:
             tp1_done = True
@@ -110,7 +114,7 @@ def outcome(sig, minutes, k, cfg):
             stop = entry
         if tp1_done and hit_tp2:
             usdt += half * (tp2 - entry) / entry * sign - half * MAKER
-            return ("TP2", 2.25, usdt - fees, j)
+            return ("TP2", 0.5 * r1 + 0.5 * r2, usdt - fees, j)
         j += 1
     return None                                           # still open when the data ends
 
@@ -200,7 +204,11 @@ def breadth_at(tl, t):
 
 def run_coin(sym, data, btc_data, start, end, mode, tl=None):
     cfg = Config()
-    if STRATEGY == "orb":
+    if STRATEGY == "smc":
+        cfg.smc_min_score = int(mode)
+        cfg.cooldown_min = cfg.smc_cooldown_min
+        strategy = cached(SmcStrategy(cfg))
+    elif STRATEGY == "orb":
         cfg.orb_range_min = float(mode)
         strategy = cached(OrbStrategy(cfg))
     elif STRATEGY == "htf":
@@ -231,6 +239,8 @@ def run_coin(sym, data, btc_data, start, end, mode, tl=None):
             coin.st.last_closed_checked = minutes[k][T]
             if coin.st.candles["15m"]:
                 coin.st.htf_checked = coin.st.candles["15m"][-1][T]
+            if coin.st.candles["1h"]:
+                coin.st.smc_1h_checked = coin.st.candles["1h"][-1][T]
             k += 1
             continue
         sig = strategy.evaluate(coin.st, t_close)
@@ -293,7 +303,10 @@ async def main():
                     "htf": [("H1", "Lines = last 1-hour candle", "1"),
                             ("H4", "Lines = last 4 hours", "4")],
                     "orb": [("O5", "Lines = first 5 min after New York open", "5"),
-                            ("O15", "Lines = first 15 min after New York open", "15")]}.get(STRATEGY, VARIANTS)
+                            ("O15", "Lines = first 15 min after New York open", "15")],
+                    "smc": [("S3", "Minimum score 3/5", "3"),
+                            ("S4", "Minimum score 4/5", "4"),
+                            ("S5", "Score 5/5 only", "5")]}.get(STRATEGY, VARIANTS)
         results = {v[0]: [] for v in variants}
         done_coins = 0
         for n, sym in enumerate(ids, 1):
@@ -314,7 +327,7 @@ async def main():
             log(f"[{n}/{len(ids)}] {sym}  trades {' '.join(line)}  (about {left:.0f} min left)")
             del data
 
-        if STRATEGY in ("range", "htf", "orb"):
+        if STRATEGY in ("range", "htf", "orb", "smc"):
             rows = {code: (name, summary(results[code])) for code, name, _ in variants}
             pools = {code: results[code] for code, _, _ in variants}
         else:
@@ -329,11 +342,12 @@ async def main():
                      "E": [t for t in c if t["side"] == "SHORT" or t["strong"]]}
         title = {"range": "5m high/low break strategy",
                  "htf": "1H high/low break, 15m entry (Daily + 4H trend)",
-                 "orb": "New York opening range break (1H + 4H trend, 1m entry)"}.get(STRATEGY, "EMA retest strategy")
+                 "orb": "New York opening range break (1H + 4H trend, 1m entry)",
+                 "smc": "Smart Money liquidity sweep + OB/FVG (4H bias, 1H setup, 15m confirmation)"}.get(STRATEGY, "EMA retest strategy")
         text = [f"🧪 <b>Backtest — {title}, last {DAYS:g} days, {done_coins} coins</b>",
-                "500 USDT per trade, fees included (market entry 0.05%)." if STRATEGY in ("range", "htf", "orb")
+                "500 USDT per trade, fees included (market entry 0.05%)." if STRATEGY in ("range", "htf", "orb", "smc")
                 else "500 USDT per trade, fees included. OI/funding check and model not included.", ""]
-        if STRATEGY not in ("range", "htf", "orb"):
+        if STRATEGY not in ("range", "htf", "orb", "smc"):
             text.insert(2, f"Strong market = at least {STRONG_BREADTH * 100:.0f}% of tested coins in a 4H uptrend.")
         for code, (name, s_) in rows.items():
             per_day = s_["usdt"] / DAYS
@@ -368,6 +382,6 @@ if __name__ == "__main__":
     for arg in sys.argv[1:]:
         if arg.isdigit():
             DAYS = float(arg)
-        elif arg.lower() in ("range", "ema", "htf", "orb"):
+        elif arg.lower() in ("range", "ema", "htf", "orb", "smc"):
             STRATEGY = arg.lower()
     asyncio.run(main())
