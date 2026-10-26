@@ -23,6 +23,7 @@ from bot.state import SymbolState
 from bot.strategy import Strategy
 from bot.strategy_range import HtfRangeStrategy, OrbStrategy, RangeStrategy
 from bot.strategy_smc import SmcStrategy
+from bot.rsi_alert import RsiAlerter
 from bot.symbols import select_symbols
 from bot.tracker import SignalTracker
 from bot.utils import Journal, fmt_usd, now_ms, setup_logging, utc_str
@@ -458,8 +459,13 @@ async def main() -> None:
         except NotImplementedError:
             pass
     error = None
+    alerter = None
     try:
-        await bot.run()
+        if cfg.strategy == "rsi":
+            alerter = RsiAlerter(cfg, bot.ex, bot.tg)
+            await alerter.run()
+        else:
+            await bot.run()
     except asyncio.CancelledError:
         log.info("Stopping...")
     except Exception as e:
@@ -470,7 +476,9 @@ async def main() -> None:
         if error:
             await bot.tg.send(f"⚠️ Bot error, restarting in 10 seconds:\n<code>{html.escape(error[:300])}</code>")
         else:
-            await bot.tg.send(f"⏹ {BOT_NAME} stopped.")
+            await bot.tg.send("⏹ RSI alert bot stopped." if cfg.strategy == "rsi" else f"⏹ {BOT_NAME} stopped.")
+        if alerter:
+            await alerter.close()
         await bot.close()
 
 

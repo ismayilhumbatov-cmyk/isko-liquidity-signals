@@ -1,4 +1,10 @@
-# Trend + EMA 50 Retest Signal Bot — Binance USDT-M Futures
+# Binance USDT-M Futures Signal Bot
+
+**Current mode: RSI alert bot (`STRATEGY=rsi` in settings.env).** Every 5 minutes it reports coins where the 5-minute RSI is above 70 and the 4H RSI is above 70 (🔴 overbought), or where the 5-minute RSI is below 20 / 25 / 30 depending on market cap under 50M / 50–100M / above 100M (🟢 oversold). The most extreme coin comes first. Information only.
+
+The other strategies below remain available and testable with `backtest.py`.
+
+# Trend + EMA 50 Retest Signal Bot
 
 **Signals only.** The bot never places orders and needs no Binance API keys. It reads public Binance Futures data, sends 🟢 LONG / 🔴 SHORT signals to Telegram, and then reports ✅ TP1, 🎯 TP2, 🛑 stop loss or ⚖️ breakeven for each signal.
 

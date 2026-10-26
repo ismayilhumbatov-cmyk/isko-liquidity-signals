@@ -62,6 +62,19 @@ class Config:
     strategy: str = field(default_factory=lambda: _str("STRATEGY", "ema").lower())
     range_5m_bars: int = field(default_factory=lambda: _int("RANGE_5M_BARS", 1))
     range_vol_mult: float = field(default_factory=lambda: _float("RANGE_VOL_MULT", 1.5))
+    # "rsi" alert bot
+    rsi_ob_5m: float = field(default_factory=lambda: _float("RSI_OB_5M", 70))
+    rsi_ob_4h: float = field(default_factory=lambda: _float("RSI_OB_4H", 70))
+    rsi_os_small: float = field(default_factory=lambda: _float("RSI_OS_SMALL", 20))
+    rsi_os_mid: float = field(default_factory=lambda: _float("RSI_OS_MID", 25))
+    rsi_os_large: float = field(default_factory=lambda: _float("RSI_OS_LARGE", 30))
+    mcap_small: float = field(default_factory=lambda: _float("MCAP_SMALL", 50_000_000))
+    mcap_large: float = field(default_factory=lambda: _float("MCAP_LARGE", 100_000_000))
+    rsi_reset_gap: float = field(default_factory=lambda: _float("RSI_RESET_GAP", 5))
+    rsi_max_alerts: int = field(default_factory=lambda: _int("RSI_MAX_ALERTS", 15))
+    mcap_pages: int = field(default_factory=lambda: _int("MCAP_PAGES", 6))
+    coingecko_api_key: str = field(default_factory=lambda: _str("COINGECKO_API_KEY"))
+
     # "smc" strategy: liquidity sweep -> displacement -> Order Block / FVG retest
     smc_disp_atr: float = field(default_factory=lambda: _float("SMC_DISP_ATR", 1.5))
     smc_disp_bars: int = field(default_factory=lambda: _int("SMC_DISP_BARS", 3))
